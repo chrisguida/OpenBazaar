@@ -1,9 +1,13 @@
+import logging
+import random
+import re
+import urllib2
+
 import obelisk
-from twisted.internet import reactor
 
 # Create new private key:
 #
-#   $ sx newkey > key1
+# $ sx newkey > key1
 #
 # Show private secret:
 #
@@ -14,6 +18,7 @@ from twisted.internet import reactor
 #   $ cat key1 | sx pubkey
 #
 # You will need 3 keys for buyer, seller and arbitrer
+
 
 def build_output_info_list(unspent_rows):
     unspent_infos = []
@@ -27,14 +32,15 @@ def build_output_info_list(unspent_rows):
             obelisk.OutputInfo(outpoint, value))
     return unspent_infos
 
-class Multisig:
 
+class Multisig(object):
     def __init__(self, client, number_required, pubkeys):
         if number_required > len(pubkeys):
             raise Exception("number_required > len(pubkeys)")
         self.client = client
         self.number_required = number_required
         self.pubkeys = pubkeys
+        self.log = logging.getLogger(self.__class__.__name__)
 
     @property
     def script(self):
@@ -48,15 +54,17 @@ class Multisig:
 
     @property
     def address(self):
+
         raw_addr = obelisk.hash_160(self.script)
         return obelisk.hash_160_to_bc_address(raw_addr, addrtype=0x05)
 
     def create_unsigned_transaction(self, destination, finished_cb):
         def fetched(ec, history):
             if ec is not None:
-                print >> sys.stderr, "Error fetching history:", ec
+                self.log.error("Error fetching history: %s", ec)
                 return
             self._fetched(history, destination, finished_cb)
+
         self.client.fetch_history(self.address, fetched)
 
     def _fetched(self, history, destination, finished_cb):
@@ -64,7 +72,9 @@ class Multisig:
         tx = self._build_actual_tx(unspent, destination)
         finished_cb(tx)
 
-    def _build_actual_tx(self, unspent, destination):
+    @staticmethod
+    def _build_actual_tx(unspent, destination):
+
         # Send all unspent outputs (everything in the address) minus the fee
         tx = obelisk.Transaction()
         total_amount = 0
@@ -76,6 +86,7 @@ class Multisig:
             value = row[3]
             total_amount += value
             add_input(tx, outpoint)
+
         # Constrain fee so we don't get negative amount to send
         fee = min(total_amount, 10000)
         send_amount = total_amount - fee
@@ -86,18 +97,57 @@ class Multisig:
         signatures = []
         key = obelisk.EllipticCurveKey()
         key.set_secret(secret)
-        for i, input in enumerate(tx.inputs):
+
+        for i, _ in enumerate(tx.inputs):
             sighash = generate_signature_hash(tx, i, self.script)
             # Add sighash::all to end of signature.
             signature = key.sign(sighash) + "\x01"
-            signatures.append(signature)
+            signatures.append(signature.encode('hex'))
         return signatures
 
+    @staticmethod
+    def make_request(*args):
+        opener = urllib2.build_opener()
+        opener.addheaders = [(
+            'User-agent',
+            'Mozilla/5.0' + str(random.randrange(1000000))
+        )]
+        try:
+            return opener.open(*args).read().strip()
+        except Exception as e:
+            try:
+                p = e.read().strip()
+            except Exception:
+                p = e
+            raise Exception(p)
+
+    @staticmethod
+    def eligius_pushtx(tx):
+        print 'FINAL TRANSACTION: %s' % tx
+        s = Multisig.make_request(
+            'http://eligius.st/~wizkid057/newstats/pushtxn.php',
+            'transaction=' + tx + '&send=Push'
+        )
+        strings = re.findall('string[^"]*"[^"]*"', s)
+        for string in strings:
+            quote = re.findall('"[^"]*"', string)[0]
+            if len(quote) >= 5:
+                return quote[1:-1]
+
+    @staticmethod
+    def broadcast(tx):
+        raw_tx = tx.serialize().encode("hex")
+        Multisig.eligius_pushtx(raw_tx)
+        # gateway_broadcast(raw_tx)
+        # bci_pushtx(raw_tx)
+
+
 def add_input(tx, prevout):
-    input = obelisk.TxIn()
-    input.previous_output.hash = prevout.hash
-    input.previous_output.index = prevout.index
-    tx.inputs.append(input)
+    tx_input = obelisk.TxIn()
+    tx_input.previous_output.hash = prevout.hash
+    tx_input.previous_output.index = prevout.index
+    tx.inputs.append(tx_input)
+
 
 def add_output(tx, address, value):
     output = obelisk.TxOut()
@@ -105,18 +155,19 @@ def add_output(tx, address, value):
     output.script = obelisk.output_script(address)
     tx.outputs.append(output)
 
+
 def generate_signature_hash(parent_tx, input_index, script_code):
     tx = obelisk.copy_tx(parent_tx)
     if input_index >= len(tx.inputs):
         return None
-    for input in tx.inputs:
-        input.script = ""
+    for tx_input in tx.inputs:
+        tx_input.script = ""
     tx.inputs[input_index].script = script_code
     raw_tx = tx.serialize() + "\x01\x00\x00\x00"
     return obelisk.Hash(raw_tx)
 
-class Escrow:
 
+class Escrow(object):
     def __init__(self, client, buyer_pubkey, seller_pubkey, arbit_pubkey):
         pubkeys = (buyer_pubkey, seller_pubkey, arbit_pubkey)
         self.multisig = Multisig(client, 2, pubkeys)
@@ -144,7 +195,7 @@ class Escrow:
 
     @staticmethod
     def complete(tx, buyer_sigs, seller_sigs, script_code):
-        for i, input in enumerate(tx.inputs):
+        for i, _ in enumerate(tx.inputs):
             sigs = (buyer_sigs[i], seller_sigs[i])
             script = "\x00"
             for sig in sigs:
@@ -154,53 +205,3 @@ class Escrow:
             script += chr(len(script_code)) + script_code
             tx.inputs[i].script = script
         return tx
-
-def main():
-    ##########################################################
-    # ESCROW TEST
-    ##########################################################
-    pubkeys = [
-        "035b175132eeb8aa6e8455b6f1c1e4b2784bea1add47a6ded7fc9fc6b7aff16700".decode("hex"),
-        "0351e400c871e08f96246458dae79a55a59730535b13d6e1d4858035dcfc5f16e2".decode("hex"),
-        "02d53a92e3d43db101db55e351e9b42b4f711d11f6a31efbd4597695330d75d250".decode("hex")
-    ]
-    client = obelisk.ObeliskOfLightClient("tcp://85.25.198.97:9091")
-    escrow = Escrow(client, pubkeys[0], pubkeys[1], pubkeys[2])
-    def finished(tx):
-        buyer_sigs = escrow.release_funds(tx,
-            "b28c7003a7b6541cd1cd881928863abac0eff85f5afb40ff5561989c9fb95fb2".decode("hex"))
-        completed_tx = escrow.claim_funds(tx,
-            "5b05667dac199c48051932f14736e6f770e7a5917d2994a15a1508daa43bc9b0".decode("hex"),
-            buyer_sigs)
-        print completed_tx.serialize().encode("hex")
-    escrow.initiate("1Fufjpf9RM2aQsGedhSpbSCGRHrmLMJ7yY", finished)
-    reactor.run()
-    return
-    ##########################################################
-    # MULTISIGNATURE TEST
-    ##########################################################
-    msig = Multisig(client, 2, pubkeys)
-    print msig.address
-    def finished(tx):
-        print tx
-        print tx.serialize().encode("hex")
-        sigs1 = msig.sign_all_inputs(tx, "b28c7003a7b6541cd1cd881928863abac0eff85f5afb40ff5561989c9fb95fb2".decode("hex"))
-        sigs3 = msig.sign_all_inputs(tx, "b74dbef0909c96d5c2d6971b37c8c71d300e41cad60aeddd6b900bba61c49e70".decode("hex"))
-        for i, input in enumerate(tx.inputs):
-            sigs = (sigs1[i], sigs3[i])
-            script = "\x00"
-            for sig in sigs:
-                script += chr(len(sig)) + sig
-            script += "\x4c"
-            assert len(msig.script) < 255
-            script += chr(len(msig.script)) + msig.script
-            print "Script:", script.encode("hex")
-            tx.inputs[i].script = script
-        print tx
-        print tx.serialize().encode("hex")
-    msig.create_unsigned_transaction("1Fufjpf9RM2aQsGedhSpbSCGRHrmLMJ7yY", finished)
-    reactor.run()
-
-if __name__ == "__main__":
-    main()
-

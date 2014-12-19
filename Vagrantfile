@@ -10,13 +10,41 @@ Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
   # please see the online documentation at vagrantup.com.
 
   # Every Vagrant virtual environment requires a box to build off of.
-  config.vm.box = "trusty"
+  config.vm.box = "trusty32"
   config.vm.box_url = "https://cloud-images.ubuntu.com/vagrant/trusty/current/trusty-server-cloudimg-i386-vagrant-disk1.box"
+
+
+  #This stanza makes use of the vagrant-cachier tool to cache apt updates while refreshing virtual machines -sbl
+  if Vagrant.has_plugin?("vagrant-cachier")
+     # Cached packages are no longer shared between instances of the same base box.
+     # See: https://github.com/OpenBazaar/OpenBazaar/issues/650
+     config.cache.scope = :machine
+
+     # If you are using VirtualBox, you might want to use that to enable NFS for
+     # shared folders. This is also very useful for vagrant-libvirt if you want
+     # bi-directional sync
+     config.cache.synced_folder_opts = {
+       type: :nfs,
+       # The nolock option can be useful for an NFSv3 client that wants to avoid the
+       # NLM sideband protocol. Without this option, apt-get might hang if it tries
+       # to lock files needed for /var/cache/* operations. All of this can be avoided
+       # by using NFSv4 everywhere. Please note that the tcp option is not the default.
+       mount_options: ['rw', 'vers=3', 'tcp', 'nolock']
+     }
+   end
+
+  config.vm.synced_folder ".", "/vagrant",  :mount_options => ["dmode=755,fmode=755"]
 
   config.vm.provision "shell", inline: <<-SCRIPT
     apt-get update
-    apt-get install -y build-essential python-dev python-pip python-zmq
-    pip install pyelliptic tornado Twisted
+    apt-get install -y build-essential python-dev python-pip python-zmq sqlite3 libjpeg-dev tor privoxy gnupg rng-tools mongodb-clients libssl-dev lintian libjs-jquery
+    pip install -r requirements.txt
+    #easy_install sqlite3dbm websocket behave
+    easy_install sqlite_dbm websocket behave bitcoin
+    cp -R /vagrant/ecdsa /usr/local/lib/python2.7/dist-packages/
+    mongo --eval "db = db.getSiblingDB('openbazaar')"
+    sudo rngd -r /dev/urandom
+    /etc/init.d/tor restart
   SCRIPT
 
   # Create a private network, which allows host-only access to the machine
@@ -26,6 +54,9 @@ Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
   # Create a forwarded port mapping which allows access to a specific port
   # within the machine from a port on the host machine.
   config.vm.network "forwarded_port", guest: 8888, host: 8888
+  config.vm.network "forwarded_port", guest: 8889, host: 8889
+  config.vm.network "forwarded_port", guest: 8890, host: 8890
+  config.vm.network "forwarded_port", guest: 12345, host: 12345
 
   # Provider-specific configuration so you can fine-tune various
   # backing providers for Vagrant. These expose provider-specific options.
